@@ -3,7 +3,7 @@ package p2pforwarder
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -73,7 +73,7 @@ func NewForwarder(p2p_port int) (*Forwarder, context.CancelFunc, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	h, err := createLibp2pHost(ctx, priv, p2p_port)
+	h, kadDHT, err := createLibp2pHost(ctx, priv, p2p_port)
 	if err != nil {
 		cancel()
 		return nil, nil, err
@@ -95,7 +95,17 @@ func NewForwarder(p2p_port int) (*Forwarder, context.CancelFunc, error) {
 	setDialHandler(f)
 	setPortsSubHandler(f)
 
-	return f, cancel, nil
+	// kad-dht v0.42 起不再用构造函数的 context 控制生命周期，
+	// 调用方取消时需要主动关闭 DHT 和 host，以保持原先的退出行为。
+	stop := func() {
+		cancel()
+		if kadDHT != nil {
+			_ = kadDHT.Close()
+		}
+		_ = h.Close()
+	}
+
+	return f, stop, nil
 }
 
 func loadUserPrivKey() (priv crypto.PrivKey, err error) {
@@ -112,7 +122,7 @@ func loadUserPrivKey() (priv crypto.PrivKey, err error) {
 	if err == nil {
 		defer pkFile.Close()
 
-		b, err := ioutil.ReadAll(pkFile)
+		b, err := io.ReadAll(pkFile)
 		if err != nil {
 			return nil, err
 		}
@@ -160,7 +170,7 @@ func loadUserPrivKey() (priv crypto.PrivKey, err error) {
 
 const Protocol = "/p2ptunnel/0.1"
 
-func createLibp2pHost(ctx context.Context, priv crypto.PrivKey, p2p_port int) (host.Host, error) {
+func createLibp2pHost(ctx context.Context, priv crypto.PrivKey, p2p_port int) (host.Host, *dht.IpfsDHT, error) {
 	var d *dht.IpfsDHT
 
 	connmgr, _ := connmgr.NewConnManager(
@@ -201,12 +211,15 @@ func createLibp2pHost(ctx context.Context, priv crypto.PrivKey, p2p_port int) (h
 
 		libp2p.Routing(func(h host.Host) (routing.PeerRouting, error) {
 			var err error
-			d, err = dht.New(ctx, h, dht.BootstrapPeers(dht.GetDefaultBootstrapPeerAddrInfos()...))
+			d, err = dht.New(h, dht.BootstrapPeers(dht.GetDefaultBootstrapPeerAddrInfos()...))
 			return d, err
 		}),
 	)
 	if err != nil {
-		return nil, err
+		if d != nil {
+			_ = d.Close()
+		}
+		return nil, nil, err
 	}
 
 	// This connects to public bootstrappers
@@ -220,7 +233,9 @@ func createLibp2pHost(ctx context.Context, priv crypto.PrivKey, p2p_port int) (h
 
 	err = d.Bootstrap(ctx)
 	if err != nil {
-		return nil, err
+		_ = d.Close()
+		_ = h.Close()
+		return nil, nil, err
 	}
 
 	d1 := routing2.NewRoutingDiscovery(d)
@@ -250,7 +265,7 @@ func createLibp2pHost(ctx context.Context, priv crypto.PrivKey, p2p_port int) (h
 		time.Sleep(time.Second * 10)
 	}()
 
-	return h, err
+	return h, d, nil
 }
 
 // ID returns id of Forwarder
