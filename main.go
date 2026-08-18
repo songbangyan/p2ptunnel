@@ -82,7 +82,7 @@ func main() {
 
 		connections[*id] = cancel
 
-		log.Printf("Connections to %s's ports are listened on %s\n", id, listenip)
+		log.Printf("Connections to %s's ports are listened on %s\n", *id, listenip)
 	}
 
 	select {}
